@@ -17,7 +17,7 @@ WORKSPACE = Path(__file__).resolve().parents[1]
 BASE_DIR = WORKSPACE / "base_model"
 
 MODELS = {
-    "Meta Llama 3 8B": "meta-llama/Meta-Llama-3-8B",
+    "Meta Llama 3 8B": "meta-llama/Meta-Llama-3.1-8B",
     "Gemma 7B": "google/gemma-7b",
     "Phi-2": "microsoft/phi-2",
     "Llama 2 7B": "meta-llama/Llama-2-7b-hf",
