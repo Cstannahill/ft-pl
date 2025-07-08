@@ -18,6 +18,7 @@ import subprocess
 import logging
 from pathlib import Path
 from typing import Optional
+import itertools
 
 from colorama import Fore, Style, init as colorama_init
 from tqdm import tqdm
@@ -47,6 +48,16 @@ GGUF_DIR = WORKSPACE / "gguf"
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 colorama_init(autoreset=True)
 logger = logging.getLogger(__name__)
+
+
+def unique_path(path: Path) -> Path:
+    """Return a non-conflicting path by appending an index if needed."""
+    if not path.exists():
+        return path
+    for i in itertools.count(1):
+        candidate = path.with_name(f"{path.stem}_{i}{path.suffix}")
+        if not candidate.exists():
+            return candidate
 
 
 # --------------------------- Stage 1 ---------------------------------------
@@ -175,16 +186,37 @@ def write_gguf(quantized_path: Path,
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run fine-tuning to GGUF pipeline")
-    parser.add_argument("--epochs", type=int, default=1, help="Number of training epochs")
-    parser.add_argument("--quant-format", default="Q4_0", help="Quantization format")
-    parser.add_argument("--model-name", default="finetuned-model", help="Name for GGUF package")
-    parser.add_argument("--base-model", required=True,
+    parser.add_argument("--epochs", type=int, help="Number of training epochs")
+    parser.add_argument("--quant-format", help="Quantization format")
+    parser.add_argument("--model-name", help="Name for GGUF package")
+    parser.add_argument("--base-model",
                         help="Directory name of the base model inside base_models/")
     args = parser.parse_args()
+
+    # Interactive prompts for missing values
+    if args.base_model is None:
+        available = [p.name for p in BASE_MODELS_DIR.glob('*') if p.is_dir()]
+        prompt = "Base model directory"
+        if available:
+            prompt += f" ({', '.join(available)})"
+        prompt += ": "
+        args.base_model = input(prompt).strip()
+
+    if args.epochs is None:
+        inp = input("Number of training epochs [1]: ").strip()
+        args.epochs = int(inp) if inp else 1
+
+    if args.quant_format is None:
+        args.quant_format = input("Quantization format [Q4_0]: ").strip() or "Q4_0"
+
+    if args.model_name is None:
+        args.model_name = input("Name for GGUF package [finetuned-model]: ").strip() or "finetuned-model"
 
     logger.info(f"{Fore.CYAN}Starting fine-tuning pipeline{Style.RESET_ALL}")
 
     base_model_dir = BASE_MODELS_DIR / args.base_model
+    if not base_model_dir.exists():
+        raise FileNotFoundError(f"Base model directory '{base_model_dir}' does not exist")
 
     with tqdm(total=4, bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]") as pbar:
         pbar.set_description("Finetuning")
@@ -197,12 +229,12 @@ def main() -> None:
 
         config_path = EXPORTED_DIR / "config.json"
         tokenizer_path = EXPORTED_DIR / "tokenizer.model"
-        quant_out = QUANTIZED_DIR / f"model.{args.quant_format}.safetensors"
+        quant_out = unique_path(QUANTIZED_DIR / f"model.{args.quant_format}.safetensors")
         pbar.set_description("Quantizing")
         quantize_model(exported, config_path, quant_out, fmt=args.quant_format)
         pbar.update(1)
 
-        gguf_out = GGUF_DIR / f"model.{args.quant_format}.gguf"
+        gguf_out = unique_path(GGUF_DIR / f"model.{args.quant_format}.gguf")
         pbar.set_description("Packaging")
         write_gguf(quant_out, config_path, tokenizer_path, gguf_out, name=args.model_name)
         pbar.update(1)
