@@ -32,6 +32,7 @@ try:
         TrainingArguments,
         Trainer,
     )
+    import torch
     from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 except Exception:
     # Training dependencies may not be installed in all environments.
@@ -92,8 +93,46 @@ def run_finetuning(base_model: Path,
     )
     model = get_peft_model(model, lora_config)
 
-    dataset = load_dataset(str(data_dir))
-    train_dataset = dataset["train"]
+    # Load raw dataset and convert into tokenized form
+    raw_ds = load_dataset(
+        "json", data_files=str(data_dir / "dataset.jsonl")
+    )["train"]
+
+    max_src_len = 512
+    max_tgt_len = 128
+
+    def format_example(example: dict) -> dict:
+        """Turn {instruction,input,output} -> model-ready tensors."""
+        prompt = example["instruction"]
+        if example["input"]:
+            prompt += f"\n{example['input']}"
+        prompt += "\n\n### Response:\n"
+        answer = example["output"]
+
+        model_inputs = tokenizer(
+            prompt,
+            truncation=True,
+            max_length=max_src_len,
+            padding=False,
+            return_tensors="pt",
+        )
+        labels = tokenizer(
+            answer,
+            truncation=True,
+            max_length=max_tgt_len,
+            padding=False,
+            return_tensors="pt",
+        )["input_ids"]
+
+        labels = torch.cat(
+            [torch.full_like(model_inputs["input_ids"], -100), labels], dim=1
+        )
+        model_inputs["labels"] = labels
+        return model_inputs
+
+    train_dataset = raw_ds.map(
+        format_example, remove_columns=raw_ds.column_names
+    )
 
     training_args = TrainingArguments(
         output_dir=str(output_dir),
