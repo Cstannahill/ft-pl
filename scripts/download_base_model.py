@@ -14,7 +14,7 @@ except ImportError:
     sys.exit(1)
 
 WORKSPACE = Path(__file__).resolve().parents[1]
-BASE_DIR = WORKSPACE / "base_model"
+BASE_DIR = WORKSPACE / "base_models"
 
 MODELS = {
     "Meta Llama 3 8B": "meta-llama/Meta-Llama-3.1-8B",
@@ -51,7 +51,7 @@ def choose_model() -> str:
 
 
 def download_model(repo_id: str) -> None:
-    dest = BASE_DIR / repo_id.replace("/", "_")
+    dest = BASE_DIR / repo_id.split("/")[-1]
     dest.mkdir(parents=True, exist_ok=True)
     print(f"Downloading {repo_id} to {dest} ...")
     snapshot_download(repo_id, local_dir=dest, local_dir_use_symlinks=False)
