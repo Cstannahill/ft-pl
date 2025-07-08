@@ -15,8 +15,12 @@ from __future__ import annotations
 
 import argparse
 import subprocess
+import logging
 from pathlib import Path
 from typing import Optional
+
+from colorama import Fore, Style, init as colorama_init
+from tqdm import tqdm
 
 # Optional imports (not strictly required if stages are skipped)
 try:
@@ -40,6 +44,10 @@ EXPORTED_DIR = WORKSPACE / "exported_model"
 QUANTIZED_DIR = WORKSPACE / "quantized"
 GGUF_DIR = WORKSPACE / "gguf"
 
+logging.basicConfig(level=logging.INFO, format="%(message)s")
+colorama_init(autoreset=True)
+logger = logging.getLogger(__name__)
+
 
 # --------------------------- Stage 1 ---------------------------------------
 
@@ -48,6 +56,10 @@ def run_finetuning(base_model: Path = BASE_MODEL_DIR,
                    output_dir: Path = FINETUNE_OUTPUT_DIR,
                    num_train_epochs: int = 1) -> None:
     """Fine-tune `base_model` using LoRA/QLoRA."""
+
+    logger.info(f"{Fore.GREEN}Stage 1: Fine-tuning model{Style.RESET_ALL}")
+    logger.debug(f"Base model: {base_model}")
+    logger.debug(f"Dataset path: {data_dir}")
 
     tokenizer = AutoTokenizer.from_pretrained(base_model)
     model = AutoModelForCausalLM.from_pretrained(
@@ -89,6 +101,7 @@ def run_finetuning(base_model: Path = BASE_MODEL_DIR,
     )
     trainer.train()
     trainer.save_model(str(output_dir))
+    logger.info("Fine-tuning complete")
 
 
 # --------------------------- Stage 2 ---------------------------------------
@@ -96,6 +109,9 @@ def run_finetuning(base_model: Path = BASE_MODEL_DIR,
 def export_merged_model(finetune_dir: Path = FINETUNE_OUTPUT_DIR,
                         output_dir: Path = EXPORTED_DIR) -> Path:
     """Merge LoRA adapters into the base model and export safetensors."""
+    logger.info(f"{Fore.GREEN}Stage 2: Exporting merged model{Style.RESET_ALL}")
+    logger.debug(f"Finetuned directory: {finetune_dir}")
+    logger.debug(f"Export directory: {output_dir}")
     model = AutoModelForCausalLM.from_pretrained(
         finetune_dir,
         device_map="auto",
@@ -106,6 +122,7 @@ def export_merged_model(finetune_dir: Path = FINETUNE_OUTPUT_DIR,
     )
     tokenizer = AutoTokenizer.from_pretrained(finetune_dir)
     tokenizer.save_pretrained(output_dir)
+    logger.info("Export complete")
     return output_dir / "model.safetensors"
 
 
@@ -116,6 +133,9 @@ def quantize_model(model_path: Path,
                    outfile: Path,
                    fmt: str = "Q4_0") -> None:
     """Invoke the Rust quantizer CLI."""
+    logger.info(f"{Fore.GREEN}Stage 3: Quantizing model{Style.RESET_ALL}")
+    logger.debug(f"Model path: {model_path}")
+    logger.debug(f"Output file: {outfile}")
     cmd = [
         "quantize-rs",
         "--model", str(model_path),
@@ -124,6 +144,7 @@ def quantize_model(model_path: Path,
         "--format", fmt,
     ]
     subprocess.run(cmd, check=True)
+    logger.info("Quantization complete")
 
 
 # --------------------------- Stage 4 ---------------------------------------
@@ -134,6 +155,9 @@ def write_gguf(quantized_path: Path,
                outfile: Path,
                name: Optional[str] = None) -> None:
     """Invoke the Rust GGUF writer CLI."""
+    logger.info(f"{Fore.GREEN}Stage 4: Writing GGUF package{Style.RESET_ALL}")
+    logger.debug(f"Quantized weights: {quantized_path}")
+    logger.debug(f"Output file: {outfile}")
     cmd = [
         "gguf-writer",
         "--model", str(quantized_path),
@@ -144,6 +168,7 @@ def write_gguf(quantized_path: Path,
     if name:
         cmd.extend(["--name", name])
     subprocess.run(cmd, check=True)
+    logger.info("GGUF package created")
 
 
 # ---------------------------------------------------------------------------
@@ -155,17 +180,30 @@ def main() -> None:
     parser.add_argument("--model-name", default="finetuned-model", help="Name for GGUF package")
     args = parser.parse_args()
 
-    run_finetuning(num_train_epochs=args.epochs)
+    logger.info(f"{Fore.CYAN}Starting fine-tuning pipeline{Style.RESET_ALL}")
 
-    exported = export_merged_model()
-    config_path = EXPORTED_DIR / "config.json"
-    tokenizer_path = EXPORTED_DIR / "tokenizer.model"
+    with tqdm(total=4, bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]") as pbar:
+        pbar.set_description("Finetuning")
+        run_finetuning(num_train_epochs=args.epochs)
+        pbar.update(1)
 
-    quant_out = QUANTIZED_DIR / f"model.{args.quant_format}.safetensors"
-    quantize_model(exported, config_path, quant_out, fmt=args.quant_format)
+        pbar.set_description("Exporting")
+        exported = export_merged_model()
+        pbar.update(1)
 
-    gguf_out = GGUF_DIR / f"model.{args.quant_format}.gguf"
-    write_gguf(quant_out, config_path, tokenizer_path, gguf_out, name=args.model_name)
+        config_path = EXPORTED_DIR / "config.json"
+        tokenizer_path = EXPORTED_DIR / "tokenizer.model"
+        quant_out = QUANTIZED_DIR / f"model.{args.quant_format}.safetensors"
+        pbar.set_description("Quantizing")
+        quantize_model(exported, config_path, quant_out, fmt=args.quant_format)
+        pbar.update(1)
+
+        gguf_out = GGUF_DIR / f"model.{args.quant_format}.gguf"
+        pbar.set_description("Packaging")
+        write_gguf(quant_out, config_path, tokenizer_path, gguf_out, name=args.model_name)
+        pbar.update(1)
+
+    logger.info(f"{Fore.CYAN}Pipeline completed successfully{Style.RESET_ALL}")
 
 
 if __name__ == "__main__":
