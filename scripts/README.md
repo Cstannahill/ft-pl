@@ -5,6 +5,8 @@ This directory contains automation scripts for the fine-tuning pipeline.
   model using the `quantize-rs` CLI, and packages the result into GGUF format via
   `gguf-writer`.
 * `run_pipeline.sh` - Convenience wrapper that invokes `run_pipeline.py`.
+* `download_base_model.py` - Interactive helper to download a base model from
+  Hugging Face into the `base_model/` directory.
 
 Run `./run_pipeline.sh` from this directory (or via `scripts/run_pipeline.sh`)
 with optional arguments such as `--epochs` or `--quant-format` to execute the
