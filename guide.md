@@ -19,7 +19,7 @@ Organizing your workspace by stages will make the process more manageable. A rec
 
 ```text
 fine-tune-workspace/
-├── base_model/              # Original base model files (from HF or elsewhere)
+├── base_models/             # Original base model files (from HF or elsewhere)
 │   ├── config.json          # Model architecture configuration
 │   ├── tokenizer.json       # Tokenizer (or vocab files, merges, etc.)
 │   └── model.safetensors    # (Optional) base model weights in safetensors (FP16/FP32)
@@ -55,7 +55,7 @@ fine-tune-workspace/
 **Training Output:** After fine-tuning, you will have one of two outcomes:
 
 - If you performed a standard fine-tune (full model update, no LoRA), the output directory (e.g. `finetune_output/`) will contain a new model checkpoint (commonly `pytorch_model.bin` or `.safetensors`) with the fully fine-tuned weights.
-- If you used LoRA/QLoRA, the output directory will contain the small LoRA adapter weights (e.g. `adapter_model.bin/safetensors`) and possibly a final merged checkpoint if you explicitly merged during training. The base model weights are typically not saved again (since they were loaded from `base_model/`).
+- If you used LoRA/QLoRA, the output directory will contain the small LoRA adapter weights (e.g. `adapter_model.bin/safetensors`) and possibly a final merged checkpoint if you explicitly merged during training. The base model weights are typically not saved again (since they were loaded from `base_models/`).
 
 **Merging LoRA Weights:** In a LoRA scenario, the next step is to merge the learned LoRA deltas into the base model to produce a full set of fine-tuned weights. This can be done using the PEFT library’s utilities. For example, after training you can load the base model and apply `PeftModel.from_pretrained(...)` to load the LoRA, then call `model.merge_and_unload()` to merge the adapter into the model’s weights. This gives you a **merged model** in memory which represents the fully fine-tuned model in full precision. Save this merged model for the export stage.
 

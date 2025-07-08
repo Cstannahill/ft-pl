@@ -37,7 +37,7 @@ except Exception:
     pass
 
 WORKSPACE = Path(__file__).resolve().parents[1]
-BASE_MODEL_DIR = WORKSPACE / "base_model"
+BASE_MODELS_DIR = WORKSPACE / "base_models"
 DATA_DIR = WORKSPACE / "data"
 FINETUNE_OUTPUT_DIR = WORKSPACE / "finetune_output"
 EXPORTED_DIR = WORKSPACE / "exported_model"
@@ -51,7 +51,7 @@ logger = logging.getLogger(__name__)
 
 # --------------------------- Stage 1 ---------------------------------------
 
-def run_finetuning(base_model: Path = BASE_MODEL_DIR,
+def run_finetuning(base_model: Path,
                    data_dir: Path = DATA_DIR,
                    output_dir: Path = FINETUNE_OUTPUT_DIR,
                    num_train_epochs: int = 1) -> None:
@@ -178,13 +178,17 @@ def main() -> None:
     parser.add_argument("--epochs", type=int, default=1, help="Number of training epochs")
     parser.add_argument("--quant-format", default="Q4_0", help="Quantization format")
     parser.add_argument("--model-name", default="finetuned-model", help="Name for GGUF package")
+    parser.add_argument("--base-model", required=True,
+                        help="Directory name of the base model inside base_models/")
     args = parser.parse_args()
 
     logger.info(f"{Fore.CYAN}Starting fine-tuning pipeline{Style.RESET_ALL}")
 
+    base_model_dir = BASE_MODELS_DIR / args.base_model
+
     with tqdm(total=4, bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]") as pbar:
         pbar.set_description("Finetuning")
-        run_finetuning(num_train_epochs=args.epochs)
+        run_finetuning(base_model=base_model_dir, num_train_epochs=args.epochs)
         pbar.update(1)
 
         pbar.set_description("Exporting")
