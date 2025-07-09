@@ -19,21 +19,22 @@ import logging
 from pathlib import Path
 from typing import Optional
 import itertools
-
+from transformers import (
+    AutoTokenizer,
+    AutoModelForCausalLM,
+    TrainingArguments,
+    Trainer,
+    BitsAndBytesConfig,
+)
+import torch
+from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 from colorama import Fore, Style, init as colorama_init
 from tqdm import tqdm
 
 # Optional imports (not strictly required if stages are skipped)
 try:
     from datasets import load_dataset
-    from transformers import (
-        AutoTokenizer,
-        AutoModelForCausalLM,
-        TrainingArguments,
-        Trainer,
-    )
-    import torch
-    from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
+
 except Exception:
     # Training dependencies may not be installed in all environments.
     pass
@@ -73,14 +74,21 @@ def run_finetuning(base_model: Path,
     logger.debug(f"Base model: {base_model}")
     logger.debug(f"Dataset path: {data_dir}")
 
+    # Use BitsAndBytesConfig to avoid deprecated warning
+    bnb_config = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_compute_dtype=torch.float16,
+        bnb_4bit_use_double_quant=True,
+        bnb_4bit_quant_type="nf4",
+    )
+
     tokenizer = AutoTokenizer.from_pretrained(base_model)
     model = AutoModelForCausalLM.from_pretrained(
         base_model,
-        load_in_4bit=True,
+        quantization_config=bnb_config,
         device_map="auto",
     )
 
-    # Prepare model for QLoRA training
     model = prepare_model_for_kbit_training(model)
 
     lora_config = LoraConfig(
@@ -93,46 +101,34 @@ def run_finetuning(base_model: Path,
     )
     model = get_peft_model(model, lora_config)
 
-    # Load raw dataset and convert into tokenized form
-    raw_ds = load_dataset(
-        "json", data_files=str(data_dir / "dataset.jsonl")
-    )["train"]
+    raw_ds = load_dataset("json", data_files=str(data_dir / "dataset.jsonl"))["train"]
 
-    max_src_len = 512
-    max_tgt_len = 128
+    max_seq_len = 768
 
     def format_example(example: dict) -> dict:
-        """Turn {instruction,input,output} -> model-ready tensors."""
         prompt = example["instruction"]
         if example["input"]:
             prompt += f"\n{example['input']}"
-        prompt += "\n\n### Response:\n"
-        answer = example["output"]
+        prompt += "\n\n### Response:\n" + example["output"]
 
-        model_inputs = tokenizer(
+        encoded = tokenizer(
             prompt,
             truncation=True,
-            max_length=max_src_len,
+            max_length=max_seq_len,
             padding=False,
             return_tensors="pt",
         )
-        labels = tokenizer(
-            answer,
-            truncation=True,
-            max_length=max_tgt_len,
-            padding=False,
-            return_tensors="pt",
-        )["input_ids"]
 
-        labels = torch.cat(
-            [torch.full_like(model_inputs["input_ids"], -100), labels], dim=1
-        )
-        model_inputs["labels"] = labels
-        return model_inputs
+        # Important: Ensure `labels` matches `input_ids` exactly
+        encoded["labels"] = encoded["input_ids"].clone()
 
-    train_dataset = raw_ds.map(
-        format_example, remove_columns=raw_ds.column_names
-    )
+        # Debug tensor shapes
+        print("Input shape:", encoded["input_ids"].shape)
+        print("Label shape:", encoded["labels"].shape)
+
+        return {k: v.squeeze(0) for k, v in encoded.items()}
+
+    train_dataset = raw_ds.map(format_example, remove_columns=raw_ds.column_names)
 
     training_args = TrainingArguments(
         output_dir=str(output_dir),
@@ -149,29 +145,38 @@ def run_finetuning(base_model: Path,
         args=training_args,
         train_dataset=train_dataset,
     )
+
     trainer.train()
     trainer.save_model(str(output_dir))
     logger.info("Fine-tuning complete")
 
 
 # --------------------------- Stage 2 ---------------------------------------
-
 def export_merged_model(finetune_dir: Path = FINETUNE_OUTPUT_DIR,
-                        output_dir: Path = EXPORTED_DIR) -> Path:
-    """Merge LoRA adapters into the base model and export safetensors."""
+                        output_dir: Path = EXPORTED_DIR,
+                        base_model_dir: Path = None) -> Path:
+    """Merge LoRA adapter into base model and export full model.safetensors."""
     logger.info(f"{Fore.GREEN}Stage 2: Exporting merged model{Style.RESET_ALL}")
-    logger.debug(f"Finetuned directory: {finetune_dir}")
-    logger.debug(f"Export directory: {output_dir}")
-    model = AutoModelForCausalLM.from_pretrained(
+    from peft import AutoPeftModelForCausalLM
+
+    # Load adapter
+    model = AutoPeftModelForCausalLM.from_pretrained(
         finetune_dir,
-        device_map="auto",
+        device_map="cpu",
+        torch_dtype=torch.float16,
     )
-    model.save_pretrained(
-        output_dir,
-        safe_serialization=True,
-    )
-    tokenizer = AutoTokenizer.from_pretrained(finetune_dir)
+
+    # Merge LoRA into base weights
+    model = model.merge_and_unload()
+
+    # Save merged full model to model.safetensors
+    model.save_pretrained(output_dir, safe_serialization=True)
+
+    # Export tokenizer from base or finetune dir
+    tokenizer_source = base_model_dir or finetune_dir
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_source, use_fast=True)
     tokenizer.save_pretrained(output_dir)
+
     logger.info("Export complete")
     return output_dir / "model.safetensors"
 
@@ -179,18 +184,16 @@ def export_merged_model(finetune_dir: Path = FINETUNE_OUTPUT_DIR,
 # --------------------------- Stage 3 ---------------------------------------
 
 def quantize_model(model_path: Path,
-                   config_path: Path,
                    outfile: Path,
                    fmt: str = "Q4_0") -> None:
     """Invoke the Rust quantizer CLI."""
     logger.info(f"{Fore.GREEN}Stage 3: Quantizing model{Style.RESET_ALL}")
-    logger.debug(f"Model path: {model_path}")
-    logger.debug(f"Output file: {outfile}")
+    quantize_bin = WORKSPACE / "rust-gguf-tools" / "target" / "release" / "quantize-rs"
+
     cmd = [
-        "quantize-rs",
-        "--model", str(model_path),
-        "--config", str(config_path),
-        "--outfile", str(outfile),
+        str(quantize_bin),
+        "--input", str(model_path),
+        "--output", str(outfile),
         "--format", fmt,
     ]
     subprocess.run(cmd, check=True)
@@ -225,10 +228,10 @@ def write_gguf(quantized_path: Path,
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run fine-tuning to GGUF pipeline")
-    parser.add_argument("--epochs", type=int, help="Number of training epochs")
-    parser.add_argument("--quant-format", help="Quantization format")
-    parser.add_argument("--model-name", help="Name for GGUF package")
-    parser.add_argument("--base-model",
+    parser.add_argument("-e","--epochs", type=int, help="Number of training epochs")
+    parser.add_argument("-q","--quant-format", help="Quantization format")
+    parser.add_argument("-m","--model-name", help="Name for GGUF package")
+    parser.add_argument("-b","--base-model",
                         help="Directory name of the base model inside base_models/")
     args = parser.parse_args()
 
@@ -263,19 +266,20 @@ def main() -> None:
         pbar.update(1)
 
         pbar.set_description("Exporting")
-        exported = export_merged_model()
+        exported = export_merged_model(base_model_dir=base_model_dir)
+
         pbar.update(1)
 
         config_path = EXPORTED_DIR / "config.json"
         tokenizer_path = EXPORTED_DIR / "tokenizer.model"
         quant_out = unique_path(QUANTIZED_DIR / f"model.{args.quant_format}.safetensors")
         pbar.set_description("Quantizing")
-        quantize_model(exported, config_path, quant_out, fmt=args.quant_format)
+        quantize_model(exported, quant_out, fmt=args.quant_format)
         pbar.update(1)
 
         gguf_out = unique_path(GGUF_DIR / f"model.{args.quant_format}.gguf")
         pbar.set_description("Packaging")
-        write_gguf(quant_out, config_path, tokenizer_path, gguf_out, name=args.model_name)
+        write_gguf(quant_out, gguf_out, name=args.model_name)
         pbar.update(1)
 
     logger.info(f"{Fore.CYAN}Pipeline completed successfully{Style.RESET_ALL}")

@@ -1,1 +1,6 @@
-base_model/*
+base_models/*
+merged/*
+quantized/*
+*.gguf
+exported_model/*
+finetune_output/*
